@@ -1,12 +1,13 @@
 module Animator where
 
 import Graphics.Blank hiding (scale)
+import Data.Text
 
-type Height = Float
-type Width = Float
-type Radius = Float
-type XCo = Float
-type YCo = Float
+type Height = Double
+type Width = Double
+type Radius = Double
+type XCo = Double
+type YCo = Double
 type Colour = String
 type StrokeStyle = String
 type Direction = String
@@ -16,7 +17,7 @@ circle :: XCo -> YCo -> Radius -> Colour -> Canvas ()
 circle x y r col = do beginPath ()
                       arc (x,y,r,0,pi*2,False)
                       closePath ()
-                      fillStyle col
+                      fillStyle $ pack col
                       fill ()
 
 rectangle :: XCo -> YCo -> Width -> Height -> Colour -> StrokeStyle -> Canvas ()
@@ -27,9 +28,9 @@ rectangle x y w h col strk= do {beginPath ();
                            lineTo (x,y+h);
                            lineTo (x,y);
                            closePath ();
-						   strokeStyle strk;
+						   strokeStyle $ pack strk;
 						   stroke ();
-						   fillStyle col;
+						   fillStyle $ pack col;
                            fill ()}
 						   
 square :: XCo -> YCo -> Width -> Colour -> Canvas ()
@@ -40,9 +41,9 @@ square x y w col = do {beginPath ();
                        lineTo (x,y+w);
                        lineTo (x,y);
                        closePath ();
-					   strokeStyle "black";
+					   strokeStyle $ pack "black";
 					   stroke ();
-                       fillStyle col;
+                       fillStyle $ pack col;
                        fill ()}
 
 triangle :: XCo -> YCo ->Direction -> Colour -> StrokeStyle -> Canvas ()
@@ -55,22 +56,14 @@ triangle x y dir col strk = do {beginPath ();
 						"left" -> do{lineTo (x-100,y);lineTo (x-100,y+150)});
                     lineTo (x,y);
                     closePath ();
-					strokeStyle strk;
+					strokeStyle $ pack strk;
 					stroke ();
-                    fillStyle col;
+                    fillStyle $ pack col;
                     fill ()}
 
-line2 :: XCo -> YCo -> StrokeStyle -> Canvas ()
-line2 x y strk = do
-					beginPath()
-					moveTo (x,y)
-					lineTo ((x-550),y)
-					lineTo ((x-550),(y-300))
-					strokeStyle strk
-					stroke ()
-						
-render :: Canvas a -> Canvas ()
-render r = do (width,height) <- size
+render :: Canvas a -> Double ->Double -> Canvas ()
+render r width height= do 
+			  --(width,height) <- size
               clearRect (0,0,width,height)
               beginPath ()
               save ()

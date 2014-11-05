@@ -7,6 +7,8 @@
   #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 import qualified Data.Map.Strict as Map
+import qualified Data.Text as Text
+import Data.List
 import Graphics.Blank
 import Animator
 import Control.Applicative
@@ -23,7 +25,8 @@ import Data.Monoid (First(..))
 
 import Data.VectorSpace hiding ((<.>))
 import Data.AffineSpace
-
+import Control.Concurrent.STM
+import Control.Concurrent.STM.TChan
 ------------------------------------------------------------
 -- Time
 ------------------------------------------------------------
@@ -118,8 +121,8 @@ duration :: Era -> Duration
 duration = (.-.) <$> end <*> start
 
 type Name=String
-type X_cord=Float
-type Y_cord=Float
+type X_cord=Double
+type Y_cord=Double
 type Low_y= Y_cord
 type High_y=Y_cord
 type Point=(X_cord,Y_cord)
@@ -131,85 +134,59 @@ type Shape=(Name,[Line])
 type ShapeMap=(Name,Map.Map Y_cord (X_cord,X_cord))
 type BoundaryFn = Origin -> [Line]
 type Eqn = Y_cord -> (X_cord,X_cord)
+type ActEvent = Name
+type Delay =Duration
 	
-mk_equation :: Point -> Point -> Y_cord -> (X_cord,X_cord,Bool)
-mk_equation  (x1,y1) (x2,y2) = case m of
-								0 ->(\y -> (x1,x2,y==y1))
-								8->(\y -> (x1,x2,(min y1 y2)<=y && y<=(max y1 y2)))
-								_ ->(\y ->let xcord=((y-y1)- m*x1)/ m in (xcord,xcord, (min x1 x2)<=xcord && xcord<=(max x1 x2)))
-								where m = if (y1==y2) then 0 --horizontal line
-										  else if (x1==x2) then 8 --vertical line
-										  else (y2-y1)/(x2-x1) --sloping line
-										  
-mk_equation1 :: Point -> Point -> Eqn
-mk_equation1  (x1,y1) (x2,y2) = case m of
+									  
+mkEquation1 :: Point -> Point -> Eqn
+mkEquation1  (x1,y1) (x2,y2) = case slope of
 									0 ->(\y -> if y==y1 then(x1,x2) else (-1,-1))
 									8->(\y -> if (min y1 y2)<=y && y<=(max y1 y2) then(x1,x2) else (-1,-1))
-									_ ->(\y ->let xcord=(((-1*y)+y1)+ m*x1)/ m in if (min x1 x2)<=xcord && xcord<=(max x1 x2) then(xcord,xcord) else (-1,-1))
-									where m = if (y1==y2) then 0 --horizontal line
-										  else if (x1==x2) then 8 --vertical line
-										  else ((-1*y2)+y1)/(x2-x1) --sloping line
+									_ ->(\y ->let xcord=(((-1*y)+y1)+ slope*x1)/ slope in if (min x1 x2)<=xcord && xcord<=(max x1 x2) then(xcord,xcord) else (-1,-1))
+									where slope = if (y1==y2) then 0 --horizontal line
+												else if (x1==x2) then 8 --vertical line -- 8 here means infinity
+												else ((-1*y2)+y1)/(x2-x1) --sloping line
 
-mk_equations :: [(Point,Point)] -> [Eqn]
-mk_equations [] = []
-mk_equations ((point1,point2):points) = (mk_equation1 point1 point2 : mk_equations points)
---gatherPoints:: [(Y_cord -> (X_cord,X_cord,Bool)] -> Y_cord -> Y_cord ->
+mkEquations :: [(Point,Point)] -> [Eqn]
+mkEquations [] = []
+mkEquations ((point1,point2):points) = (mkEquation1 point1 point2 : mkEquations points)
 
-get_cord_from_one_y ::  Eqn -> Y_cord -> (Y_cord,(X_cord,X_cord))
-get_cord_from_one_y eqn y = (y,eqn y)
 
-get_all_cords_from_eqn :: Eqn -> Low_y -> High_y ->[(Y_cord,(X_cord,X_cord))]
-get_all_cords_from_eqn eqn low_y high_y = filter validPoints $ map (get_cord_from_one_y eqn) [low_y,low_y+1..high_y]
-
-validPoints :: (Y_cord,(X_cord,X_cord)) -> Bool
-validPoints (y,(x1,x2)) = if x1== -1 then False else True
-
-eqns_to_map :: [Eqn] -> Low_y -> High_y -> Map.Map Y_cord (X_cord,X_cord)
-eqns_to_map eqns low_y high_y = cords_from_eqns_to_map eqns Map.empty low_y high_y 
-
-cords_from_eqns_to_map :: [Eqn] -> Map.Map Y_cord (X_cord,X_cord) -> Low_y -> High_y -> Map.Map Y_cord (X_cord,X_cord)
-cords_from_eqns_to_map eqns cord_map low_y high_y = foldl (cords_from_eqn_to_map low_y high_y) cord_map eqns
-
-cords_from_eqn_to_map :: Low_y -> High_y -> Map.Map Y_cord (X_cord,X_cord) -> Eqn -> Map.Map Y_cord (X_cord,X_cord)
-cords_from_eqn_to_map low_y high_y cord_map eqn = foldl insert_into_map cord_map $ get_all_cords_from_eqn eqn low_y high_y
-
-insert_into_map :: Map.Map Y_cord (X_cord,X_cord) -> (Y_cord,(X_cord,X_cord)) -> Map.Map Y_cord (X_cord,X_cord)
-insert_into_map cord_map (y,(x1,x2))=Map.insertWith find_min_max y (x1,x2) cord_map
-
-find_min_max :: (X_cord,X_cord) -> (X_cord,X_cord) -> (X_cord,X_cord)
-find_min_max (x1,x2) (x3,x4) = (if x1 < x3 then x1 else x3 , if x2 > x4 then x2 else x4)
+eqnsToMap :: [Eqn] -> Low_y -> High_y -> Map.Map Y_cord (X_cord,X_cord)
+eqnsToMap eqns l h = convertAllEqnsIntoMap eqns Map.empty l h
+			where
+				convertAllEqnsIntoMap eqs m l h = foldl' (convertOneEqnIntoMap l h) m eqs
+				convertOneEqnIntoMap l h m eq = foldl' insertIntoMap m $ getAllPointFromEqn eq l h
+				insertIntoMap m (y,(x1,x2))=Map.insertWith findMinMax y (x1,x2) m
+				findMinMax (x1,x2) (x3,x4) = (if x1 < x3 then x1 else x3 , if x2 > x4 then x2 else x4)
+				getPointUsingY eq y = (y,eq y)
+				getAllPointFromEqn eq l h = filter validPoints $ map (getPointUsingY eq) [l,l+1..h]
+				validPoints (y,(x1,x2)) = if x1== -1 then False else True
 
 shapesToShapeMaps :: [Shape] -> [ShapeMap]
 shapesToShapeMaps shapes = map (\ (name,lines) -> (name, linesToMap lines)) shapes
 
 linesToMap::[Line] -> Map.Map Y_cord (X_cord,X_cord)
-linesToMap lines = eqns_to_map (mk_equations lines) (findMinY lines) (findMaxY lines)
+linesToMap [] = Map.empty
+linesToMap lines = eqnsToMap (mkEquations lines) (findMinY lines) (findMaxY lines)
+					where
+						findMinY lines = findMinY_aux lines 9999999
+						findMaxY lines = findMaxY_aux lines (-1)
+						findMinY_aux [] min = min
+						findMinY_aux ((p1,p2):lines) min = findMinY_aux lines (find_min p1 p2 min)						
+						findMaxY_aux [] max = max
+						findMaxY_aux ((p1,p2):lines) max = findMaxY_aux lines (find_max p1 p2 max)
+						find_max = (\(x1,y1) (x2,y2) m -> if y1 >= y2 then (if y1 > m then y1 else m ) else (if y2 > m then y2 else m))
+						find_min = (\(x1,y1) (x2,y2) m -> if y1 <= y2 then (if y1 < m then y1 else m ) else (if y2 < m then y2 else m))
 
-findMinY :: [Line] -> Y_cord
-findMinY lines = findMinY_aux lines 9999999
-
-findMinY_aux ::[Line] -> Y_cord -> Y_cord
-findMinY_aux [] min = min
-findMinY_aux ((p1,p2):lines) min = findMinY_aux lines (find_min p1 p2 min)
-									 where find_min = (\(x1,y1) (x2,y2) m -> if y1 <= y2 then (if y1 < m then y1 else m )
-																			 else (if y2 < m then y2 else m))
-
-findMaxY :: [Line] -> Y_cord
-findMaxY lines = findMaxY_aux lines (-1)
-
-findMaxY_aux :: [Line] -> Y_cord -> Y_cord
-findMaxY_aux [] max = max
-findMaxY_aux ((p1,p2):lines) max = findMaxY_aux lines (find_max p1 p2 max)
-									 where find_max = (\(x1,y1) (x2,y2) m -> if y1 >= y2 then (if y1 > m then y1 else m )
-																		     else (if y2 > m then y2 else m))
 																			 
-traverseShapesAndDetect :: [ShapeMap] -> Map.Map Name [Name] -> Map.Map Name [Name]
+traverseShapesAndDetect :: [ShapeMap] -> Map.Map Name [ActEvent] -> Map.Map Name [ActEvent]
 traverseShapesAndDetect [] a = a
 traverseShapesAndDetect (shapeM:shapesM) a = traverseShapesAndDetect shapesM $ detect shapeM shapesM a
 
-detect :: ShapeMap -> [ShapeMap] -> Map.Map Name [Name] -> Map.Map Name [Name]
+detect :: ShapeMap -> [ShapeMap] -> Map.Map Name [ActEvent] -> Map.Map Name [ActEvent]
 detect shapeM shapesM a = foldl (detect_aux shapeM) a shapesM
-							where detect_aux = (\(n1,m1) a (n2,m2) -> if (compareMaps m1 m2)
+							where detect_aux = (\(n1,m1) a (n2,m2) -> if m1 /= Map.empty && m2 /= Map.empty && (compareMaps m1 m2)
 																	  then Map.insertWith (++) n1 [n2] $ Map.insertWith (++) n2 [n1] a
 																	  else a )
 
@@ -229,89 +206,105 @@ compareMaps m1 m2 = if m1min > m2max || m2min > m1max
 instance Semigroup (Canvas ()) where
 	(<>) = mappend
 
--- makes Canvas an instance of Monoid
-instance Monoid a => Monoid (Canvas a) where 
-	mempty = return mempty
-	mappend = liftM2 mappend
-
 data Evnt a = Evnt a
 	deriving (Eq, Ord, Show)
 	
 data Dynamic a = Dynamic { era        		:: Era
 						 , originMap 		:: Map.Map Name (Time,OriginFn)
-						 , eventOriginMap 	:: Map.Map Name [(Name,OriginFn)]
+						 , eventOriginMap 	:: Map.Map Name [(ActEvent,OriginFn)]
                          , runDynamic 		:: Time -> Dynamic a -> a
-						 , boundaryMap 		:: Map.Map Name BoundaryFn
+						 , boundaryMap 		:: Map.Map Name (BoundaryFn,Delay)
                          }
 						 
 getShapes :: Dynamic a -> Time -> [Shape]
-getShapes d t = map (\(n,bfn) -> (n, bfn ((\(Just (st,ofn))-> ofn st (fromTime t)) (Map.lookup n (originMap d)))))  $ Map.toList $ boundaryMap d
+getShapes d t = map (\(n,(bfn,del)) -> if fromTime (t .-^ del) >= 0 then (n, bfn ((\(Just (st,ofn))-> ofn st (fromTime (t .-^ del))) (Map.lookup n (originMap d)))) else (n,[]))  $ Map.toList $ boundaryMap d
 
 --changeDynamic d t eventMap = d {originMap = Map.fromList [("newDynamic1", ( t ,originFn2)),("newDynamic2",(t,originFn3))]}
-changeDynamic d t eventMap = if (Map.null (eventOriginMap d)) || (Map.null eventMap) then d else foldl (updateFn t) d $ Map.toList eventMap
+changeDynamic d t oldEventMap eventMap = if (Map.null (eventOriginMap d)) || (Map.null eventMap) 
+											then d 
+											else foldl (updateFn t) d $ Map.toList $ diffEventMaps oldEventMap eventMap
+
+diffEventMaps :: Map.Map Name [ActEvent] -> Map.Map Name [ActEvent] -> Map.Map Name [ActEvent]
+diffEventMaps oldEventMap newEventMap = Map.mapWithKey fn newEventMap
+											where
+												fn k v = let oldVal= Map.lookup k oldEventMap in
+															if oldVal== Nothing
+															then v
+															else v \\ (fromJust oldVal)
 
 
-updateFn :: Time -> Dynamic a -> (Name ,[Name]) -> Dynamic a
-updateFn t d (n,evntlist)= if (null oFns) then d else modifyOriginMap d n timeOFNTuple
+updateFn :: Time -> Dynamic a -> (Name ,[ActEvent]) -> Dynamic a
+updateFn t d (n,evntlist)= if (null oFns) 
+							then d 
+							else if (length oFns) == 0 then d else modifyOriginMap d n (t, (head oFns))
 								where
-									timeOFNTuple= (t, (head oFns))
 									oFns = getOFNs evntlist $ Map.lookup n (eventOriginMap d)
-
-getOFNs :: [Name] -> Maybe [(Name,OriginFn)] -> [OriginFn]
-getOFNs _ Nothing = []
-getOFNs evntList (Just evntOriginList) = map snd.head $ map ( \eventName -> filter ( \ (n,ofn) -> n == eventName) evntOriginList ) evntList
+									getOFNs _ Nothing = []
+									getOFNs [] _ = []
+									getOFNs evntList (Just evntOriginList) = map snd.head $ map ( \eventName -> filter ( \ (n,ofn) -> n == eventName) evntOriginList ) evntList 									
 
 modifyOriginMap :: Dynamic a -> Name -> ( Time, OriginFn) -> Dynamic a
 modifyOriginMap d name timeOFNTuple = d {originMap =Map.insert name timeOFNTuple (originMap d)}
 
-simulate rate d = simulate_aux rate d (start (era d)) (end (era d))
+simulate rate d = simulate_aux rate d (start (era d)) (end (era d)) Map.empty
 
-simulate_aux rate d t e= if t > e then [] else (runDynamic d) t d : simulate_aux rate changedDynamic (t + (1^/rate)) e
+simulate_aux rate d t e oldEventMap = if t > e then [] else currentCanvas: simulate_aux rate changedDynamic (t + (1^/rate)) e newEventMap
 							where
-								--changedDynamic =if (fromTime t) /= 4 then d else d {originMap = Map.fromList [("newDynamic1", ( t ,originFn2)),("newDynamic2",(t,originFn3))]}
-								changedDynamic = changeDynamic d t $ traverseShapesAndDetect (shapesToShapeMaps (getShapes d t)) Map.empty
+								currentCanvas = (runDynamic d) t d
+								newEventMap = traverseShapesAndDetect (shapesToShapeMaps (getShapes d t)) Map.empty
+								changedDynamic = changeDynamic d t oldEventMap newEventMap
+
 
 newDynamic1 :: Dynamic (Canvas ())
-newDynamic1 = Dynamic { era = mkEra (toTime 0) (toTime 10)
-						, originMap = Map.fromList [("newDynamic1", ((toTime 0),originFn1)),("newDynamic2",((toTime 0),originFn3))]
-						, eventOriginMap = Map.fromList [("newDynamic1",[("newDynamic2",originFn2)]),("newDynamic2",[("newDynamic1",originFn4)])]
-						, runDynamic =	((\t d -> square1 $ (\(Just (st,ofn)) -> ofn st t) $ (Map.lookup "newDynamic1" (originMap d))) <> (\t d -> square2 $ (\(Just (st,ofn)) -> ofn st t) $ (Map.lookup "newDynamic2" (originMap d))))
-						, boundaryMap = Map.fromList [("newDynamic1",square1BFn),("newDynamic2",square1BFn)]
+newDynamic1 = Dynamic { era = mkEra (toTime 0) (toTime 10) <> mkEra (toTime 0) (toTime 5)
+						, originMap = Map.fromList [("newDynamic1", ((toTime 0),originFn1))
+													,("newDynamic2",((toTime 0),originFn3))
+													,("newDynamic3",((toTime 0),originFn5))]
+						, eventOriginMap = Map.fromList [("newDynamic1",[("newDynamic2",originFn2)])]
+						, runDynamic =	((\t d -> square1 $ (\(Just (st,ofn)) -> ofn st t) $ (Map.lookup "newDynamic1" (originMap d))) <> (\t d -> square2 $ (\(Just (st,ofn)) -> ofn st (t .-^ (toDuration 5))) $ (Map.lookup "newDynamic2" (originMap d)))) <> (\t d -> square1 $ (\(Just (st,ofn)) -> ofn st t) $ (Map.lookup "newDynamic3" (originMap d)))
+						, boundaryMap = Map.fromList [("newDynamic1",(square1BFn,toDuration 0)),("newDynamic2",(square1BFn,toDuration 5))]
 						}
 
 						
 -- main function which starts the animation
 main :: IO ()
-main = blankCanvas 3000 $ \ context -> play context $ simulate (toRational 30) newDynamic1 
+main = blankCanvas 3000 { events = [Text.pack "click"] } $ \ context -> do
+                    e <- atomically $ (fmap Just $ readTChan (eventQueue context)) `orElse` return Nothing
+                    putStrLn $ show $ e
+                    play context $ simulate (toRational 30) newDynamic1
 
-play context [] = do { send context $ do {fillText ("The End",650,250)}}
+play context [] = do { send context $ do {fillText ((Text.pack "The End"),650,250)}}
 play context (n:ns) = do{
 				send context $ do {
-					render n};
+					render n (width context) (height context)};
 				play context ns}
 
 
 originFn1 :: Time -> Time -> Origin
-originFn1 startTime currTime = ((400 + ( 50 *(fromTime currTime))) , 300)
+originFn1 startTime currTime = if currTime >= 0 then ((400 + ( 50 *(fromTime currTime))) , 300) else (-1,-1)
 
 originFn2 :: Time -> Time -> Origin
-originFn2 startTime currTime = (((400+(50 * (fromTime startTime)))  - (((fromTime currTime) - (fromTime startTime))* 50)),300)
+originFn2 startTime currTime = if currTime >= 0 
+								then(((400+(50 * (fromTime startTime)))  - (((fromTime currTime) - (fromTime startTime))* 50)),300) 
+								else (-1,-1)
 
 originFn3 :: Time -> Time -> Origin
-originFn3 startTime currTime = ((900 - ( 50 *(fromTime currTime))) , 300)
+originFn3 startTime currTime =if currTime >= 0 then((900 - ( 50 *(fromTime currTime))) , 300) else (-1,-1)
 
 originFn4:: Time -> Time -> Origin
-originFn4 startTime currTime = (startXPosition + (time * 50), 300)
+originFn4 startTime currTime = if currTime >= 0 then (startXPosition + (time * 50), 300) else (-1,-1)
 								where
 									startXPosition= (900 - (50 * (fromTime startTime)))
 									time = (fromTime currTime) - (fromTime startTime)
+originFn5 :: Time -> Time -> Origin
+originFn5 startTime currTime =if currTime >= 0 then((900 - ( 50 *(fromTime currTime))) , 400) else (-1,-1)
 
 square1BFn :: Origin -> [Line]
 square1BFn (x,y) = [((x,y),(x+100,y)),((x+100,y),(x+100,y+100)),((x+100,y+100),(x,y+100)),((x,y+100),(x,y))]
 
 square1 :: Origin -> Canvas ()
-square1 (x,y) = square x y 100 "Red"
+square1 (x,y) = if x >= 0 && y >= 0 then square x y 100 "Red" else return()
 
 square2 :: Origin -> Canvas ()
-square2 (x,y) = square x y 100 "Blue"
+square2 (x,y) = if x >= 0 && y >= 0 then square x y 100 "Blue" else return ()
 
