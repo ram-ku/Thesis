@@ -269,15 +269,16 @@ newDynamic1 = Dynamic { era = mkEra (toTime 0) (toTime 10) <> mkEra (toTime 0) (
 -- main function which starts the animation
 main :: IO ()
 main = blankCanvas 3000 { events = [Text.pack "click"] } $ \ context -> do
-                    e <- atomically $ (fmap Just $ readTChan (eventQueue context)) `orElse` return Nothing
-                    putStrLn $ show $ e
-                    play context $ simulate (toRational 30) newDynamic1
+                    play context "Play" $ simulate (toRational 30) newDynamic1
 
-play context [] = do { send context $ do {fillText ((Text.pack "The End"),650,250)}}
-play context (n:ns) = do{
+play context _ [] = do { send context $ do {fillText ((Text.pack "The End"),650,250)}}
+play context status (n:ns) = do{
 				send context $ do {
 					render n (width context) (height context)};
-				play context ns}
+				e <- atomically $ (fmap Just $ readTChan (eventQueue context)) `orElse` return Nothing ;
+				if status == "Play" 
+				then if (show e) == "Nothing" then play context "Play" ns else play context "Pause" (n:ns)
+				else if (show e) == "Nothing" then play context "Pause" (n:ns) else play context "Play" ns}
 
 
 originFn1 :: Time -> Time -> Origin
