@@ -132,10 +132,12 @@ type CanvasFn a = Origin -> a
 type Line=(Point,Point)
 type Shape=(Name,[Line])
 type ShapeMap=(Name,Map.Map Y_cord (X_cord,X_cord))
-type BoundaryFn = Origin -> [Line]
 type Eqn = Y_cord -> (X_cord,X_cord)
 type ActEvent = Name
 type Delay =Duration
+type EventAction = (ActEvent,OriginFn)
+type ShapeFn a = Origin -> a
+type BoundaryFn = Origin -> [Line]
 	
 									  
 mkEquation1 :: Point -> Point -> Eqn
@@ -203,8 +205,11 @@ compareMaps m1 m2 = if m1min > m2max || m2min > m1max
 						check (Just (x1,x2)) (Just (x3,x4)) = if x1>x4 || x3>x2 then False else True
 
 -- makes Canvas an instance of semigroup 
-instance Semigroup (Canvas ()) where
+instance Monoid a => Semigroup (Canvas a) where
 	(<>) = mappend
+
+instance Semigroup a => Semigroup (Dynamic a) where
+  Dynamic e1 om1 eom1 rd1 bm1 <> Dynamic e2 om2 eom2 rd2 bm2 = Dynamic (e1 <> e2) (Map.union om1 om2) (Map.union eom1 eom2) (rd1 <> rd2) (Map.union bm1 bm2)
 
 data Evnt a = Evnt a
 	deriving (Eq, Ord, Show)
@@ -215,6 +220,128 @@ data Dynamic a = Dynamic { era        		:: Era
                          , runDynamic 		:: Time -> Dynamic a -> a
 						 , boundaryMap 		:: Map.Map Name (BoundaryFn,Delay)
                          }
+						 
+mkDynamic :: Name ->ShapeFn a-> BoundaryFn -> Int -> Int -> OriginFn -> [EventAction] -> Dynamic a
+mkDynamic name sFn bFn start end oFn evntActs = Dynamic { era = mkEra (toTime start) (toTime end)
+														, originMap = Map.fromList [(name,((toTime 0),oFn))]
+														, eventOriginMap = Map.fromList [(name,evntActs)]
+														, runDynamic =(\t d -> sFn $ (\ (st,ofn) ->ofn st t) $ fromJust $ Map.lookup name (originMap d))
+														, boundaryMap = Map.fromList [(name,(bFn,toDuration 0))]}
+														
+shiftDynamic :: Duration -> Dynamic a -> Dynamic a
+shiftDynamic sh dy = dy { era = mkEra ((start $ era dy) .+^ sh) ((end $ era dy) .+^ sh)
+					  , runDynamic = (\ t d -> (runDynamic dy) (t .-^ sh) d)
+					  , boundaryMap = Map.map (\(bFn,d) -> (bFn,(d + sh))) (boundaryMap dy)}
+					  
+newtype Active a = Active (MaybeApply Dynamic a)
+
+instance Newtype (Active a) (MaybeApply Dynamic a) where
+  pack              = Active
+  unpack (Active m) = m
+
+instance Newtype (MaybeApply f a) (Either (f a) a) where
+  pack   = MaybeApply
+  unpack = runMaybeApply
+  
+over2 :: (Newtype n o, Newtype n' o', Newtype n'' o'')
+      => (o -> n) -> (o -> o' -> o'') -> (n -> n' -> n'')
+over2 _ f n1 n2 = pack (f (unpack n1) (unpack n2))
+
+instance Semigroup a => Semigroup (Active a) where
+  (<>) = (over2 Active . over2 MaybeApply) combine
+   where
+    combine (Right m1) (Right m2)
+      = Right (m1 <> m2)
+
+    combine (Left d) (Right m)
+      = Left (d {runDynamic = (runDynamic d) <> (\_ _ -> m)})
+
+    combine (Right m) (Left d)
+      = Left (d {runDynamic = (\_ _ -> m) <> (runDynamic d)})
+
+    combine (Left d1) (Left d2)
+      = Left (d1 <> d2)
+
+instance (Monoid a, Semigroup a) => Monoid (Active a) where
+  mempty  = Active (MaybeApply (Right mempty))
+  mappend = (<>)
+  
+-- | Create an 'Active' value from a 'Dynamic'.
+fromDynamic :: Dynamic a -> Active a
+fromDynamic = Active . MaybeApply . Left
+
+mkActive ::Name ->ShapeFn a-> BoundaryFn -> Int -> Int -> OriginFn -> [EventAction] -> Active a
+mkActive name sFn bFn start end oFn evntActs = fromDynamic (mkDynamic name sFn bFn start end oFn evntActs)
+
+onActive :: (a -> b) -> (Dynamic a -> b) -> Active a -> b
+onActive f _ (Active (MaybeApply (Right a))) = f a
+onActive _ f (Active (MaybeApply (Left d)))  = f d
+
+modActive :: (a -> b) -> (Dynamic a -> Dynamic b) -> Active a -> Active b
+modActive f g = onActive (Active . MaybeApply . Right . f) (fromDynamic . g)
+
+runActive :: Active a -> (Time -> Dynamic a -> a)
+runActive = onActive (\ a _ _ -> a) runDynamic
+
+activeEra :: Active a -> Maybe Era
+activeEra = onActive (const Nothing) (Just . era)
+
+isConstant :: Active a -> Bool
+isConstant = onActive (const True) (const False)
+
+-- | Test whether an 'Active' value is 'Dynamic'.
+isDynamic :: Active a -> Bool
+isDynamic = onActive (const False) (const True)
+
+------------------------------------------------------------
+--  Combinators
+------------------------------------------------------------
+
+stretch :: Rational -> Active a -> Active a
+stretch str = modActive id (\dy -> dy { era= mkEra (start $ era dy) ((start $ era dy) .+^ (str *^ ((end $ era dy) .-. (start $ era dy))))
+										, runDynamic = (\ t d -> (runDynamic dy) ((start $ era dy) .+^ ((t .-. (start $ era dy)) ^/ str)) d)})
+										
+stretchTo :: Duration -> Active a -> Active a
+stretchTo d a
+  | d <= 0                               = a
+  | (duration <$> activeEra a) == Just 0 = a
+  | otherwise = maybe a (`stretch` a) ((toRational . (d /) . duration) <$> activeEra a)
+  
+shift :: Duration -> Active a -> Active a
+shift sh = modActive id (shiftDynamic sh)
+
+trim :: Monoid a => Active a -> Active a
+trim = modActive id (\dy -> dy { runDynamic = (\ t d -> case () of _ | t < (start $ era dy) -> mempty
+																	 | t > (end $ era dy)   -> mempty
+																	 | otherwise -> (runDynamic dy) t d)})
+trimBefore :: Monoid a => Active a -> Active a
+trimBefore = modActive id (\dy -> dy { runDynamic = (\ t d -> case () of _ | t < (start $ era dy) -> mempty
+																		   | otherwise -> (runDynamic dy) t d)})
+
+trimAfter :: Monoid a => Active a -> Active a
+trimAfter = modActive id (\dy -> dy { runDynamic = (\ t d -> case () of _ | t > (end $ era dy) -> mempty
+																		  | otherwise -> (runDynamic dy) t d)})
+
+setEra :: Era -> Active a -> Active a
+setEra er = modActive id (\dy -> dy { era = er})
+
+atTime :: Time -> Active a -> Active a
+atTime t a = maybe a (\e -> shift (t .-. start e) a) (activeEra a)
+
+after :: Active a -> Active a -> Active a
+after a1 a2 = maybe a1 ((`atTime` a1) . end) (activeEra a2)
+
+(->>) :: Semigroup a => Active a -> Active a -> Active a
+a1 ->> a2 = a1 <> (a2 `after` a1)
+
+(|>>) :: (Monoid a , Semigroup a) => Active a -> Active a -> Active a
+a1 |>> a2 = (trimAfter a1) ->> (trimBefore a2)
+
+movie :: (Monoid a , Semigroup a) => [Active a] -> Active a
+movie = foldr1 (|>>)
+
+getDelay :: Name -> Dynamic a -> Duration
+getDelay n d = snd $ fromJust $ Map.lookup n $ boundaryMap d
 						 
 getShapes :: Dynamic a -> Time -> [Shape]
 getShapes d t = map (\(n,(bfn,del)) -> if fromTime (t .-^ del) >= 0 then (n, bfn ((\(Just (st,ofn))-> ofn st (fromTime (t .-^ del))) (Map.lookup n (originMap d)))) else (n,[]))  $ Map.toList $ boundaryMap d
@@ -236,7 +363,7 @@ diffEventMaps oldEventMap newEventMap = Map.mapWithKey fn newEventMap
 updateFn :: Time -> Dynamic a -> (Name ,[ActEvent]) -> Dynamic a
 updateFn t d (n,evntlist)= if (null oFns) 
 							then d 
-							else if (length oFns) == 0 then d else modifyOriginMap d n (t, (head oFns))
+							else if (length oFns) == 0 then d else modifyOriginMap d n ((t .-^ (getDelay n d)), (head oFns))
 								where
 									oFns = getOFNs evntlist $ Map.lookup n (eventOriginMap d)
 									getOFNs _ Nothing = []
@@ -246,9 +373,12 @@ updateFn t d (n,evntlist)= if (null oFns)
 modifyOriginMap :: Dynamic a -> Name -> ( Time, OriginFn) -> Dynamic a
 modifyOriginMap d name timeOFNTuple = d {originMap =Map.insert name timeOFNTuple (originMap d)}
 
+simulateActive :: Rational -> Active a -> [(Time,a)]
+simulateActive rate = onActive (\a -> zip (map toTime [0,(0+(1/(fromRational rate)))]) (repeat a)) (\d -> simulate rate d)
+
 simulate rate d = simulate_aux rate d (start (era d)) (end (era d)) Map.empty
 
-simulate_aux rate d t e oldEventMap = if t > e then [] else currentCanvas: simulate_aux rate changedDynamic (t + (1^/rate)) e newEventMap
+simulate_aux rate d t e oldEventMap = if t > e then [] else (t,currentCanvas): simulate_aux rate changedDynamic (t + (1^/rate)) e newEventMap
 							where
 								currentCanvas = (runDynamic d) t d
 								newEventMap = traverseShapesAndDetect (shapesToShapeMaps (getShapes d t)) Map.empty
@@ -256,49 +386,56 @@ simulate_aux rate d t e oldEventMap = if t > e then [] else currentCanvas: simul
 
 
 newDynamic1 :: Dynamic (Canvas ())
-newDynamic1 = Dynamic { era = mkEra (toTime 0) (toTime 10) <> mkEra (toTime 0) (toTime 5)
+newDynamic1 = Dynamic { era = mkEra (toTime 0) (toTime 10) <> mkEra (toTime 10) (toTime 15)
 						, originMap = Map.fromList [("newDynamic1", ((toTime 0),originFn1))
 													,("newDynamic2",((toTime 0),originFn3))
 													,("newDynamic3",((toTime 0),originFn5))]
-						, eventOriginMap = Map.fromList [("newDynamic1",[("newDynamic2",originFn2)])]
+						, eventOriginMap = Map.fromList [("newDynamic1",[("newDynamic2",originFn2)]),("newDynamic2",[("newDynamic1",originFn4)])]
 						, runDynamic =	((\t d -> square1 $ (\(Just (st,ofn)) -> ofn st t) $ (Map.lookup "newDynamic1" (originMap d))) <> (\t d -> square2 $ (\(Just (st,ofn)) -> ofn st (t .-^ (toDuration 5))) $ (Map.lookup "newDynamic2" (originMap d)))) <> (\t d -> square1 $ (\(Just (st,ofn)) -> ofn st t) $ (Map.lookup "newDynamic3" (originMap d)))
 						, boundaryMap = Map.fromList [("newDynamic1",(square1BFn,toDuration 0)),("newDynamic2",(square1BFn,toDuration 5))]
 						}
 
-						
+														
+testDynamic1 = mkDynamic "testDynamic1" square1 square1BFn 0 10 originFn1 [("testDynamic2",originFn2)]
+testDynamic2 = mkDynamic "testDynamic2" square2 square1BFn 0 10 originFn3 [("testDynamic1",originFn4)]
+
+testActive1 = mkActive "testActive1" square1 square1BFn 0 10 originFn1 [("testActive2",originFn2)]
+testActive2 = mkActive "testActive2" square2 square1BFn 0 10 originFn3 [("testActive1",originFn4)]
+
 -- main function which starts the animation
 main :: IO ()
 main = blankCanvas 3000 { events = [Text.pack "click"] } $ \ context -> do
-                    play context "Play" $ simulate (toRational 30) newDynamic1
+                    play context "Play" [2,3,4] $ simulateActive (toRational 30) $ (trimBefore testActive1) <>  (trimBefore $ shift (toDuration 5) testActive2)
 
-play context _ [] = do { send context $ do {fillText ((Text.pack "The End"),650,250)}}
-play context status (n:ns) = do{
+play context _ _ [] = do { send context $ do {fillText ((Text.pack "The End"),650,250)}}
+play context status intervals (n:ns)  = do{
 				send context $ do {
-					render n (width context) (height context)};
+					render (snd n) (width context) (height context)};
 				e <- atomically $ (fmap Just $ readTChan (eventQueue context)) `orElse` return Nothing ;
 				if status == "Play" 
-				then if (show e) == "Nothing" then play context "Play" ns else play context "Pause" (n:ns)
-				else if (show e) == "Nothing" then play context "Pause" (n:ns) else play context "Play" ns}
+				then if (length intervals) > 0 && (fst n) >= (head intervals) 
+						then play context "Pause" (tail intervals) (n:ns) 
+						else if (show e) == "Nothing" then play context "Play" intervals ns else play context "Pause" intervals (n:ns)
+				--then if (show e) == "Nothing" then play context "Play" ns else play context "Pause" (n:ns)
+				else if (show e) == "Nothing" then play context "Pause" intervals (n:ns) else play context "Play" intervals ns}
 
 
 originFn1 :: Time -> Time -> Origin
-originFn1 startTime currTime = if currTime >= 0 then ((400 + ( 50 *(fromTime currTime))) , 300) else (-1,-1)
+originFn1 startTime currTime = ((400 + ( 50 *(fromTime currTime))) , 300)
 
 originFn2 :: Time -> Time -> Origin
-originFn2 startTime currTime = if currTime >= 0 
-								then(((400+(50 * (fromTime startTime)))  - (((fromTime currTime) - (fromTime startTime))* 50)),300) 
-								else (-1,-1)
+originFn2 startTime currTime = (((400+(50 * (fromTime startTime)))  - (((fromTime currTime) - (fromTime startTime))* 50)),300)
 
 originFn3 :: Time -> Time -> Origin
-originFn3 startTime currTime =if currTime >= 0 then((900 - ( 50 *(fromTime currTime))) , 300) else (-1,-1)
+originFn3 startTime currTime =((900 - ( 50 *(fromTime currTime))) , 300)
 
 originFn4:: Time -> Time -> Origin
-originFn4 startTime currTime = if currTime >= 0 then (startXPosition + (time * 50), 300) else (-1,-1)
+originFn4 startTime currTime = (startXPosition + (time * 50), 300)
 								where
 									startXPosition= (900 - (50 * (fromTime startTime)))
 									time = (fromTime currTime) - (fromTime startTime)
 originFn5 :: Time -> Time -> Origin
-originFn5 startTime currTime =if currTime >= 0 then((900 - ( 50 *(fromTime currTime))) , 400) else (-1,-1)
+originFn5 startTime currTime =((900 - ( 50 *(fromTime currTime))) , 400)
 
 square1BFn :: Origin -> [Line]
 square1BFn (x,y) = [((x,y),(x+100,y)),((x+100,y),(x+100,y+100)),((x+100,y+100),(x,y+100)),((x,y+100),(x,y))]
