@@ -127,7 +127,7 @@ type Low_y= Y_cord
 type High_y=Y_cord
 type Point=(X_cord,Y_cord)
 type Origin = Point
-type OriginFn = Time -> Time -> Origin
+type OriginFn = Time -> Point-> Time -> Origin
 type CanvasFn a = Origin -> a
 type Line=(Point,Point)
 type Shape=(Name,[Line])
@@ -215,7 +215,7 @@ data Evnt a = Evnt a
 	deriving (Eq, Ord, Show)
 	
 data Dynamic a = Dynamic { era        		:: Era
-						 , originMap 		:: Map.Map Name (Time,OriginFn)
+						 , originMap 		:: Map.Map Name ((Time,Point),OriginFn)
 						 , eventOriginMap 	:: Map.Map Name [(ActEvent,OriginFn)]
                          , runDynamic 		:: Time -> Dynamic a -> a
 						 , boundaryMap 		:: Map.Map Name (BoundaryFn,(Time,Time))
@@ -223,9 +223,9 @@ data Dynamic a = Dynamic { era        		:: Era
 						 
 mkDynamic :: Name ->ShapeFn a-> BoundaryFn -> Int -> Int -> OriginFn -> [EventAction] -> Dynamic a
 mkDynamic name sFn bFn start end oFn evntActs = Dynamic { era = mkEra (toTime start) (toTime end)
-														, originMap = Map.fromList [(name,((toTime 0),oFn))]
+														, originMap = Map.fromList [(name,((toTime 0,(-1,-1)),oFn))]
 														, eventOriginMap = Map.fromList [(name,evntActs)]
-														, runDynamic =(\t d -> sFn $ (\ (st,ofn) ->ofn st t) $ fromJust $ Map.lookup name (originMap d))
+														, runDynamic =(\t d -> sFn $ (\ ((st,sp),ofn) ->ofn st sp t) $ fromJust $ Map.lookup name (originMap d))
 														, boundaryMap = Map.fromList [(name,(bFn,(toTime (-1),toTime (99999999))))]}
 														
 shiftDynamic :: Duration -> Dynamic a -> Dynamic a
@@ -352,7 +352,7 @@ getDelay n d = if delay == -1 then toTime 0 else delay
 					delay = fst $ snd $ fromJust $ Map.lookup n $ boundaryMap d
 						 
 getShapes :: Dynamic a -> Time -> [Shape]
-getShapes d t = map (\(n,(bfn,(s,e))) -> if (fromTime t) > (fromTime s) && (fromTime t) < (fromTime e) then (n, bfn ((\(Just (st,ofn))-> ofn st $ fromTime $ t - s) (Map.lookup n $ originMap d))) else (n,[]))  $ Map.toList $ boundaryMap d
+getShapes d t = map (\(n,(bfn,(s,e))) -> if (fromTime t) > (fromTime s) && (fromTime t) < (fromTime e) then (n, bfn ((\(Just ((st,sp),ofn))-> ofn st sp $ fromTime $ t - s) (Map.lookup n $ originMap d))) else (n,[]))  $ Map.toList $ boundaryMap d
 
 --changeDynamic d t eventMap = d {originMap = Map.fromList [("newDynamic1", ( t ,originFn2)),("newDynamic2",(t,originFn3))]}
 changeDynamic d t oldEventMap eventMap = if (Map.null (eventOriginMap d)) || (Map.null eventMap) 
@@ -371,14 +371,17 @@ diffEventMaps oldEventMap newEventMap = Map.mapWithKey fn newEventMap
 updateFn :: Time -> Dynamic a -> (Name ,[ActEvent]) -> Dynamic a
 updateFn t d (n,evntlist)= if (null oFns) 
 							then d 
-							else if (length oFns) == 0 then d else modifyOriginMap d n (t - (getDelay n d), (head oFns))
+							else if (length oFns) == 0 then d else modifyOriginMap d n ((time,startPosition), (head oFns))
 								where
+									((st,sp),currentOFn)= fromJust $ Map.lookup n $ originMap d
+									time = t - (getDelay n d)
+									startPosition = currentOFn st sp time									
 									oFns = getOFNs evntlist $ Map.lookup n (eventOriginMap d)
 									getOFNs _ Nothing = []
 									getOFNs [] _ = []
 									getOFNs evntList (Just evntOriginList) = map snd.head $ map ( \eventName -> filter ( \ (n,ofn) -> n == eventName) evntOriginList ) evntList 									
 
-modifyOriginMap :: Dynamic a -> Name -> ( Time, OriginFn) -> Dynamic a
+modifyOriginMap :: Dynamic a -> Name -> ((Time,Point), OriginFn) -> Dynamic a
 modifyOriginMap d name timeOFNTuple = d {originMap =Map.insert name timeOFNTuple (originMap d)}
 
 simulateActive :: Rational -> Active a -> [(Time,a)]
@@ -412,7 +415,7 @@ testActive2 = mkActive "testActive2" square2 square1BFn 0 10 originFn3 [("testAc
 -- main function which starts the animation
 main :: IO ()
 main = blankCanvas 3000 { events = [Text.pack "click"] } $ \ context -> do
-                    play context "Play" [2,3,4] $ simulateActive (toRational 30) $ (trimBefore testActive1) |>> (trimBefore testActive2)
+                    play context "Play" [2,3,4] $ simulateActive (toRational 30) $ (trimBefore testActive1) <> (trimBefore testActive2)
 
 play context _ _ [] = do { send context $ do {fillText ((Text.pack "The End"),650,250)}}
 play context status intervals (n:ns)  = do{
@@ -427,22 +430,27 @@ play context status intervals (n:ns)  = do{
 				else if (show e) == "Nothing" then play context "Pause" intervals (n:ns) else play context "Play" intervals ns}
 
 
-originFn1 :: Time -> Time -> Origin
-originFn1 startTime currTime = ((400 + ( 50 *(fromTime currTime))) , 300)
+originFn1 :: Time -> Point -> Time -> Origin
+originFn1 startTime startPosition currTime = ((400 + ( 50 *(fromTime currTime))) , 300)
 
-originFn2 :: Time -> Time -> Origin
-originFn2 startTime currTime = (((400+(50 * (fromTime startTime)))  - (((fromTime currTime) - (fromTime startTime))* 50)),300)
-
-originFn3 :: Time -> Time -> Origin
-originFn3 startTime currTime =((900 - ( 50 *(fromTime currTime))) , 300)
-
-originFn4:: Time -> Time -> Origin
-originFn4 startTime currTime = (startXPosition + (time * 50), 300)
+originFn2 :: Time -> Point -> Time -> Origin
+originFn2 startTime startPosition currTime = (startXposition - (time * 50),300)
 								where
-									startXPosition= (900 - (50 * (fromTime startTime)))
+									--startXposition= 400+(50 * (fromTime startTime))
+									startXposition = fst startPosition
 									time = (fromTime currTime) - (fromTime startTime)
-originFn5 :: Time -> Time -> Origin
-originFn5 startTime currTime =((900 - ( 50 *(fromTime currTime))) , 400)
+
+originFn3 :: Time -> Point -> Time -> Origin
+originFn3 startTime startPosition currTime =((900 - ( 50 *(fromTime currTime))) , 300)
+
+originFn4:: Time -> Point -> Time -> Origin
+originFn4 startTime startPosition currTime = (startXPosition + (time * 50), 300)
+								where
+									--startXPosition= (900 - (50 * (fromTime startTime)))
+									startXPosition= fst startPosition
+									time = (fromTime currTime) - (fromTime startTime)
+originFn5 :: Time -> Point -> Time -> Origin
+originFn5 startTime startPosition currTime =((900 - ( 50 *(fromTime currTime))) , 400)
 
 square1BFn :: Origin -> [Line]
 square1BFn (x,y) = [((x,y),(x+100,y)),((x+100,y),(x+100,y+100)),((x+100,y+100),(x,y+100)),((x,y+100),(x,y))]
