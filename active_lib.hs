@@ -6,11 +6,11 @@
            , FlexibleInstances
   #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
+module Active_lib where
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
 import Data.List
 import Graphics.Blank
-import Animator
 import Control.Applicative
 import Control.Arrow ((&&&))
 import Control.Newtype
@@ -221,7 +221,7 @@ data Dynamic a = Dynamic { era        		:: Era
 						 , boundaryMap 		:: Map.Map Name (BoundaryFn,(Time,Time))
                          }
 						 
-mkDynamic :: Name ->ShapeFn a-> BoundaryFn -> Int -> Int -> OriginFn -> [EventAction] -> Dynamic a
+mkDynamic :: Name ->ShapeFn a-> BoundaryFn -> Double -> Double -> OriginFn -> [EventAction] -> Dynamic a
 mkDynamic name sFn bFn start end oFn evntActs = Dynamic { era = mkEra (toTime start) (toTime end)
 														, originMap = Map.fromList [(name,((toTime 0,(-1,-1)),oFn))]
 														, eventOriginMap = Map.fromList [(name,evntActs)]
@@ -231,6 +231,7 @@ mkDynamic name sFn bFn start end oFn evntActs = Dynamic { era = mkEra (toTime st
 shiftDynamic :: Duration -> Dynamic a -> Dynamic a
 shiftDynamic sh dy = dy { era = mkEra (st .+^ sh) (en .+^ sh)
 					  , runDynamic = (\ t d -> (runDynamic dy) (t .-^ sh) d)
+					  , originMap = Map.map (\((st,sp),ofn) -> ((st .+^ sh ,sp),ofn)) (originMap dy)
 					  , boundaryMap = Map.map (\(bFn,(s,e)) -> (bFn,(if (fromTime s) == -1 then (st .+^ sh) else s .+^ sh,if (fromTime e) == 99999999 then e else (e .+^ sh)))) (boundaryMap dy)}
 						where 
 							st = (start $ era dy)
@@ -273,7 +274,7 @@ instance (Monoid a, Semigroup a) => Monoid (Active a) where
 fromDynamic :: Dynamic a -> Active a
 fromDynamic = Active . MaybeApply . Left
 
-mkActive ::Name ->ShapeFn a-> BoundaryFn -> Int -> Int -> OriginFn -> [EventAction] -> Active a
+mkActive ::Name ->ShapeFn a-> BoundaryFn -> Double -> Double -> OriginFn -> [EventAction] -> Active a
 mkActive name sFn bFn start end oFn evntActs = fromDynamic (mkDynamic name sFn bFn start end oFn evntActs)
 
 onActive :: (a -> b) -> (Dynamic a -> b) -> Active a -> b
@@ -337,6 +338,9 @@ atTime t a = maybe a (\e -> shift (t .-. start e) a) (activeEra a)
 after :: Active a -> Active a -> Active a
 after a1 a2 = maybe a1 ((`atTime` a1) . end) (activeEra a2)
 
+(<=>) :: (Monoid a , Semigroup a) => Active a -> Active a -> Active a
+a1 <=> a2 = a1 <> a2
+
 (->>) :: Semigroup a => Active a -> Active a -> Active a
 a1 ->> a2 = a1 <> (a2 `after` a1)
 
@@ -354,7 +358,6 @@ getDelay n d = if delay == -1 then toTime 0 else delay
 getShapes :: Dynamic a -> Time -> [Shape]
 getShapes d t = map (\(n,(bfn,(s,e))) -> if (fromTime t) > (fromTime s) && (fromTime t) < (fromTime e) then (n, bfn ((\(Just ((st,sp),ofn))-> ofn st sp $ fromTime $ t - s) (Map.lookup n $ originMap d))) else (n,[]))  $ Map.toList $ boundaryMap d
 
---changeDynamic d t eventMap = d {originMap = Map.fromList [("newDynamic1", ( t ,originFn2)),("newDynamic2",(t,originFn3))]}
 changeDynamic d t oldEventMap eventMap = if (Map.null (eventOriginMap d)) || (Map.null eventMap) 
 											then d 
 											else foldl (updateFn t) d $ Map.toList $ diffEventMaps oldEventMap eventMap
@@ -366,7 +369,6 @@ diffEventMaps oldEventMap newEventMap = Map.mapWithKey fn newEventMap
 															if oldVal== Nothing
 															then v
 															else v \\ (fromJust oldVal)
-
 
 updateFn :: Time -> Dynamic a -> (Name ,[ActEvent]) -> Dynamic a
 updateFn t d (n,evntlist)= if (null oFns) 
@@ -406,58 +408,38 @@ simulate_aux rate d t e oldEventMap = if t > e then [] else (t,currentCanvas): s
 						-- , boundaryMap = Map.fromList [("newDynamic1",(square1BFn,toDuration 0)),("newDynamic2",(square1BFn,toDuration 5))]
 						-- }
 														
-testDynamic1 = mkDynamic "testDynamic1" square1 square1BFn 0 10 originFn1 [("testDynamic2",originFn2)]
-testDynamic2 = mkDynamic "testDynamic2" square2 square1BFn 0 10 originFn3 [("testDynamic1",originFn4)]
 
-testActive1 = mkActive "testActive1" square1 square1BFn 0 10 originFn1 [("testActive2",originFn2)]
-testActive2 = mkActive "testActive2" square2 square1BFn 0 10 originFn3 [("testActive1",originFn4)]
 
--- main function which starts the animation
-main :: IO ()
-main = blankCanvas 3000 { events = [Text.pack "click"] } $ \ context -> do
-                    play context "Play" [2,3,4] $ simulateActive (toRational 30) $ (trimBefore testActive1) <> (trimBefore testActive2)
-
-play context _ _ [] = do { send context $ do {fillText ((Text.pack "The End"),650,250)}}
+play context _ _ [] = do 
+						send context $ do 
+										clearRect (0,0,100,40)
+										font $ Text.pack "20px Verdana"
+										fillStyle $ Text.pack "blue"
+										--fillText ((Text.pack "The End"),650,250)
+										fillText ((Text.pack "Done"),20,20)
 play context status intervals (n:ns)  = do{
 				send context $ do {
-					render (snd n) (width context) (height context)};
+					render (snd n) (width context) (height context);
+					font $ Text.pack "10px Verdana";fillStyle $ Text.pack "blue";
+					fillText ((Text.pack $ take 5 $ show $ fromTime $ fst n),20,50);
+					if status == "Play" 
+						then do {font $ Text.pack "20px Verdana";fillStyle $ Text.pack "green";fillText ((Text.pack "Playing"),20,20);};
+						else do {font $ Text.pack "20px Verdana";fillStyle $ Text.pack "red";fillText ((Text.pack "Paused"),20,20);};
+					};
 				e <- atomically $ (fmap Just $ readTChan (eventQueue context)) `orElse` return Nothing ;
 				if status == "Play" 
 				then if (length intervals) > 0 && (fst n) >= (head intervals) 
 						then play context "Pause" (tail intervals) (n:ns) 
 						else if (show e) == "Nothing" then play context "Play" intervals ns else play context "Pause" intervals (n:ns)
-				--then if (show e) == "Nothing" then play context "Play" ns else play context "Pause" (n:ns)
-				else if (show e) == "Nothing" then play context "Pause" intervals (n:ns) else play context "Play" intervals ns}
-
-
-originFn1 :: Time -> Point -> Time -> Origin
-originFn1 startTime startPosition currTime = ((400 + ( 50 *(fromTime currTime))) , 300)
-
-originFn2 :: Time -> Point -> Time -> Origin
-originFn2 startTime startPosition currTime = (startXposition - (time * 50),300)
-								where
-									--startXposition= 400+(50 * (fromTime startTime))
-									startXposition = fst startPosition
-									time = (fromTime currTime) - (fromTime startTime)
-
-originFn3 :: Time -> Point -> Time -> Origin
-originFn3 startTime startPosition currTime =((900 - ( 50 *(fromTime currTime))) , 300)
-
-originFn4:: Time -> Point -> Time -> Origin
-originFn4 startTime startPosition currTime = (startXPosition + (time * 50), 300)
-								where
-									--startXPosition= (900 - (50 * (fromTime startTime)))
-									startXPosition= fst startPosition
-									time = (fromTime currTime) - (fromTime startTime)
-originFn5 :: Time -> Point -> Time -> Origin
-originFn5 startTime startPosition currTime =((900 - ( 50 *(fromTime currTime))) , 400)
-
-square1BFn :: Origin -> [Line]
-square1BFn (x,y) = [((x,y),(x+100,y)),((x+100,y),(x+100,y+100)),((x+100,y+100),(x,y+100)),((x,y+100),(x,y))]
-
-square1 :: Origin -> Canvas ()
-square1 (x,y) = if x >= 0 && y >= 0 then square x y 100 "Red" else return()
-
-square2 :: Origin -> Canvas ()
-square2 (x,y) = if x >= 0 && y >= 0 then square x y 100 "Blue" else return ()
-
+				else if (show e) == "Nothing" then play context "Pause" intervals (n:ns) else play context "Play" intervals ns;
+				}
+				
+render :: Canvas a -> Double ->Double -> Canvas ()
+render r width height= do 
+					clearRect (0,0,width,height)
+					fillStyle $ Text.pack "white"
+					fillRect (0,0,width,height)
+					beginPath ()
+					save ()
+					r
+					restore ()
