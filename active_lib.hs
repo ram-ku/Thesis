@@ -138,6 +138,7 @@ type Delay =Duration
 type EventAction = (ActEvent,OriginFn)
 type ShapeFn a = Origin -> a
 type BoundaryFn = Origin -> [Line]
+type OriginMap = Map.Map Name ((Time,Point),OriginFn)
 	
 									  
 mkEquation1 :: Point -> Point -> Eqn
@@ -215,22 +216,23 @@ data Evnt a = Evnt a
 	deriving (Eq, Ord, Show)
 	
 data Dynamic a = Dynamic { era        		:: Era
-						 , originMap 		:: Map.Map Name ((Time,Point),OriginFn)
+						 , originMap 		:: OriginMap
 						 , eventOriginMap 	:: Map.Map Name [(ActEvent,OriginFn)]
-                         , runDynamic 		:: Time -> Dynamic a -> a
+                         , runDynamic 		:: Time -> OriginMap -> a
 						 , boundaryMap 		:: Map.Map Name (BoundaryFn,(Time,Time))
-                         }
-						 
+                         } deriving (Functor)
+instance Apply Dynamic where
+  (Dynamic d1 om1 eom1 f1 bm1) <.> (Dynamic d2 om2 eom2 f2 bm2) = Dynamic (d1 <> d2) (om1 <> om2) (eom1 <> eom2) ((\t x om -> f1 t om x) <.> (\t -> f2 t om2)) (bm1 <> bm2)
 mkDynamic :: Name ->ShapeFn a-> BoundaryFn -> Double -> Double -> OriginFn -> [EventAction] -> Dynamic a
 mkDynamic name sFn bFn start end oFn evntActs = Dynamic { era = mkEra (toTime start) (toTime end)
 														, originMap = Map.fromList [(name,((toTime 0,(-1,-1)),oFn))]
 														, eventOriginMap = Map.fromList [(name,evntActs)]
-														, runDynamic =(\t d -> sFn $ (\ ((st,sp),ofn) ->ofn st sp t) $ fromJust $ Map.lookup name (originMap d))
+														, runDynamic =(\t om -> sFn $ (\ ((st,sp),ofn) ->ofn st sp t) $ fromJust $ Map.lookup name om)
 														, boundaryMap = Map.fromList [(name,(bFn,(toTime (-1),toTime (99999999))))]}
 														
 shiftDynamic :: Duration -> Dynamic a -> Dynamic a
 shiftDynamic sh dy = dy { era = mkEra (st .+^ sh) (en .+^ sh)
-					  , runDynamic = (\ t d -> (runDynamic dy) (t .-^ sh) d)
+					  , runDynamic = (\ t om -> (runDynamic dy) (t .-^ sh) om)
 					  , originMap = Map.map (\((st,sp),ofn) -> ((st .+^ sh ,sp),ofn)) (originMap dy)
 					  , boundaryMap = Map.map (\(bFn,(s,e)) -> (bFn,(if (fromTime s) == -1 then (st .+^ sh) else s .+^ sh,if (fromTime e) == 99999999 then e else (e .+^ sh)))) (boundaryMap dy)}
 						where 
@@ -238,7 +240,7 @@ shiftDynamic sh dy = dy { era = mkEra (st .+^ sh) (en .+^ sh)
 							en = (end $ era dy)
 					  
 newtype Active a = Active (MaybeApply Dynamic a)
-
+	deriving (Functor,Apply,Applicative)
 instance Newtype (Active a) (MaybeApply Dynamic a) where
   pack              = Active
   unpack (Active m) = m
@@ -284,7 +286,7 @@ onActive _ f (Active (MaybeApply (Left d)))  = f d
 modActive :: (a -> b) -> (Dynamic a -> Dynamic b) -> Active a -> Active b
 modActive f g = onActive (Active . MaybeApply . Right . f) (fromDynamic . g)
 
-runActive :: Active a -> (Time -> Dynamic a -> a)
+runActive :: Active a -> (Time -> OriginMap -> a)
 runActive = onActive (\ a _ _ -> a) runDynamic
 
 activeEra :: Active a -> Maybe Era
@@ -303,7 +305,7 @@ isDynamic = onActive (const False) (const True)
 
 stretch :: Rational -> Active a -> Active a
 stretch str = modActive id (\dy -> dy { era = mkEra (start $ era dy) ((start $ era dy) .+^ (str *^ ((end $ era dy) .-. (start $ era dy))))
-									  , runDynamic = (\ t d -> (runDynamic dy) ((start $ era dy) .+^ ((t .-. (start $ era dy)) ^/ str)) d)})
+									  , runDynamic = (\ t om -> (runDynamic dy) ((start $ era dy) .+^ ((t .-. (start $ era dy)) ^/ str)) om)})
 										
 stretchTo :: Duration -> Active a -> Active a
 stretchTo d a
@@ -315,18 +317,18 @@ shift :: Duration -> Active a -> Active a
 shift sh = modActive id (shiftDynamic sh)
 
 trim :: Monoid a => Active a -> Active a
-trim = modActive id (\dy -> dy { runDynamic = (\ t d -> case () of _ | t < (start $ era dy) -> mempty
+trim = modActive id (\dy -> dy { runDynamic = (\ t om -> case () of _ | t < (start $ era dy) -> mempty
 																	 | t > (end $ era dy)   -> mempty
-																	 | otherwise -> (runDynamic dy) t d)
+																	 | otherwise -> (runDynamic dy) t om)
 							   , boundaryMap = Map.map (\(bFn,(s,e)) -> (bFn,(if (fromTime s) == -1 then (start $ era dy) else s,if (fromTime e) == 99999999 then (end $ era dy) else e))) (boundaryMap dy)})
 trimBefore :: Monoid a => Active a -> Active a
-trimBefore = modActive id (\dy -> dy { runDynamic = (\ t d -> case () of _ | t < (start $ era dy) -> mempty
-																		   | otherwise -> (runDynamic dy) t d)
+trimBefore = modActive id (\dy -> dy { runDynamic = (\ t om -> case () of _ | t < (start $ era dy) -> mempty
+																		   | otherwise -> (runDynamic dy) t om)
 									 , boundaryMap = Map.map (\(bFn,(s,e)) -> (bFn,(if (fromTime s) == -1 then (start $ era dy) else s,e))) (boundaryMap dy)})
 
 trimAfter :: Monoid a => Active a -> Active a
-trimAfter = modActive id (\dy -> dy { runDynamic = (\ t d -> case () of _ | t > (end $ era dy) -> mempty
-																		  | otherwise -> (runDynamic dy) t d)
+trimAfter = modActive id (\dy -> dy { runDynamic = (\ t om -> case () of _ | t > (end $ era dy) -> mempty
+																		  | otherwise -> (runDynamic dy) t om)
 									, boundaryMap = Map.map (\(bFn,(s,e)) -> (bFn,(s,if (fromTime e) == 99999999 then (end $ era dy) else e))) (boundaryMap dy)})
 
 setEra :: Era -> Active a -> Active a
@@ -393,7 +395,7 @@ simulate rate d = simulate_aux rate d (start (era d)) (end (era d)) Map.empty
 
 simulate_aux rate d t e oldEventMap = if t > e then [] else (t,currentCanvas): simulate_aux rate changedDynamic (t + (1^/rate)) e newEventMap
 							where
-								currentCanvas = (runDynamic d) t d
+								currentCanvas = (runDynamic d) t (originMap d)
 								newEventMap = traverseShapesAndDetect (shapesToShapeMaps (getShapes d t)) Map.empty
 								changedDynamic = changeDynamic d t oldEventMap newEventMap
 

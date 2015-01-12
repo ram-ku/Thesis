@@ -60,6 +60,17 @@ triangle x y dir col strk = do {beginPath ();
 					stroke ();
                     fillStyle $ pack col;
                     fill ()}
+					
+line :: XCo -> YCo -> Double -> Direction -> Canvas ()
+line x y l dir = do 
+					moveTo (x,y)
+					case dir of
+						"left" -> lineTo (x-l,y)
+						"right" -> lineTo (x+l,y)
+						"up" -> lineTo (x,y-l)
+						"down" -> lineTo (x,y+l)
+					strokeStyle $ pack "black"
+					stroke ()
 
 render :: Canvas a -> Double ->Double -> Canvas ()
 render r width height= do 
