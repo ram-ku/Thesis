@@ -399,25 +399,11 @@ simulate_aux rate d t e oldEventMap = if t > e then [] else (t,currentCanvas): s
 								newEventMap = traverseShapesAndDetect (shapesToShapeMaps (getShapes d t)) Map.empty
 								changedDynamic = changeDynamic d t oldEventMap newEventMap
 
-
--- newDynamic1 :: Dynamic (Canvas ())
--- newDynamic1 = Dynamic { era = mkEra (toTime 0) (toTime 10) <> mkEra (toTime 10) (toTime 15)
-						-- , originMap = Map.fromList [("newDynamic1", ((toTime 0),originFn1))
-													-- ,("newDynamic2",((toTime 0),originFn3))
-													-- ,("newDynamic3",((toTime 0),originFn5))]
-						-- , eventOriginMap = Map.fromList [("newDynamic1",[("newDynamic2",originFn2)]),("newDynamic2",[("newDynamic1",originFn4)])]
-						-- , runDynamic =	((\t d -> square1 $ (\(Just (st,ofn)) -> ofn st t) $ (Map.lookup "newDynamic1" (originMap d))) <> (\t d -> square2 $ (\(Just (st,ofn)) -> ofn st (t .-^ (toDuration 5))) $ (Map.lookup "newDynamic2" (originMap d)))) <> (\t d -> square1 $ (\(Just (st,ofn)) -> ofn st t) $ (Map.lookup "newDynamic3" (originMap d)))
-						-- , boundaryMap = Map.fromList [("newDynamic1",(square1BFn,toDuration 0)),("newDynamic2",(square1BFn,toDuration 5))]
-						-- }
-														
-
-
 play context _ _ [] = do 
 						send context $ do 
 										clearRect (0,0,100,40)
 										font $ Text.pack "20px Verdana"
 										fillStyle $ Text.pack "blue"
-										--fillText ((Text.pack "The End"),650,250)
 										fillText ((Text.pack "Done"),20,20)
 play context status intervals (n:ns)  = do{
 				send context $ do {

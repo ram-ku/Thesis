@@ -58,30 +58,11 @@ scale s f = realToFrac s * f
 scaleLength :: (Double,Double) -> Scale -> Canvas Double
 scaleLength (x,y) s = return (scale s ((x+y)/2))
 
--- scaleWidth :: Scale -> Canvas Float
--- scaleWidth s = do (x,_) <- size
-                  -- return (scale s x)
-
--- scaleHeight :: Scale -> Canvas Float
--- scaleHeight s = do (_,y) <- size
-                   -- return (scale s y)
-
 scaleX :: (Double,Double) -> Scale -> Canvas XCo
 scaleX (x,_) s = return (scale s x)
 
 scaleY :: (Double,Double) -> Scale -> Canvas YCo
 scaleY (_,y) s = return (scale (1-s) y)
-
--- toscale :: Int -> Float -> Scale
--- toscale i z = realToFrac (fromIntegral i / z)
-
--- toscaleX :: Int -> Canvas Scale
--- toscaleX i = do (x,_) <- size
-                -- return (toscale i x)
-
--- toscaleY :: Int -> Canvas Scale
--- toscaleY i = do (_,y) <- size
-                -- return (1 - toscale i y)
 
 runSFcanvas :: IO a -> SF a b -> ((Double,Double) -> b -> Canvas ()) -> DeviceContext -> IO ()
 runSFcanvas inp sf r canvas = do 

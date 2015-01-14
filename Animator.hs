@@ -74,7 +74,6 @@ line x y l dir = do
 
 render :: Canvas a -> Double ->Double -> Canvas ()
 render r width height= do 
-			  --(width,height) <- size
               clearRect (0,0,width,height)
               beginPath ()
               save ()

@@ -10,8 +10,7 @@ import Graphics.Blank
 main :: IO ()
 main = blankCanvas 3000 $ \context -> do runSFcanvas (return ()) (bouncingBox box1) renderBall context
 
---renderBall :: (Double,Double) -> Box -> Canvas Text
---renderBall  size [] = do return ()
+renderBall :: (Double,Double) -> Box -> Canvas ()
 renderBall  size b = do 
 					x <- scaleX size (boxPosX b)
 					y <- scaleY size (boxPosY b)
